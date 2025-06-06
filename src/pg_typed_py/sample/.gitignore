@@ -1,0 +1,5 @@
+*.py
+# include test.py and __init__.py
+!test.py
+!__init__.py
+

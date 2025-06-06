@@ -1,0 +1,44 @@
+root = true
+
+[*]
+end_of_line = lf
+indent_size = 2
+tab_width = 2
+indent_style = space
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+# Python
+[*.py]
+indent_size = 4
+tab_width = 4
+
+# Markdown
+[*.md]
+indent_size = 2
+tab_width = 2
+
+# config files
+[{*.yml,*.yaml,*.toml,*.ini}]
+indent_size = 2
+tab_width = 2
+
+# Frontend
+[{*.js,*.ts,*.tsx,*.jsx,*.css,*.scss,*.json}]
+indent_size = 2
+tab_width = 2
+
+# Dockerfile
+[Dockerfile]
+indent_size = 4
+tab_width = 4
+
+# SQL
+[*.sql]
+indent_size = 4
+tab_width = 4
+
+# Shell
+[{*.sh,*.bash,*.zsh}]
+indent_size = 2
+tab_width = 2
