@@ -1,1 +1,4 @@
-select * from users
+/*
+name=get_all_user
+*/
+select * from users;
