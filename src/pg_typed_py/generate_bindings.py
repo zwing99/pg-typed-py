@@ -38,7 +38,7 @@ def extract_params(sql: str) -> List[str]:
 def parse_multi_query_file(content: str) -> List[Dict]:
     """
     Parse a SQL file that may contain multiple queries with name= comments.
-    Returns list of dicts with 'name' and 'sql' keys.
+    Returns list of dicts with 'name', 'sql', and 'query_type' keys.
     """
     queries = []
 
@@ -46,6 +46,7 @@ def parse_multi_query_file(content: str) -> List[Dict]:
     parts = re.split(r"(/\*.*?name\s*=\s*[\w_]+.*?\*/)", content, flags=re.DOTALL)
 
     current_name = None
+    current_query_type = "multi"  # default
 
     for part in parts:
         part = part.strip()
@@ -56,14 +57,28 @@ def parse_multi_query_file(content: str) -> List[Dict]:
         name_match = re.search(r"/\*.*?name\s*=\s*([\w_]+).*?\*/", part, re.DOTALL)
         if name_match:
             current_name = name_match.group(1)
+            # Check for query_type in the same comment block
+            query_type_match = re.search(
+                r"query_type\s*=\s*(single|multi)", part, re.IGNORECASE
+            )
+            current_query_type = (
+                query_type_match.group(1).lower() if query_type_match else "multi"
+            )
         else:
             # This is SQL content
             if current_name and part:
                 # Clean up the SQL (remove trailing semicolons)
                 sql = part.strip().rstrip(";")
                 if sql:
-                    queries.append({"name": current_name, "sql": sql})
+                    queries.append(
+                        {
+                            "name": current_name,
+                            "sql": sql,
+                            "query_type": current_query_type,
+                        }
+                    )
                 current_name = None
+                current_query_type = "multi"  # reset to default
 
     # If no named queries found, treat the entire content as a single query
     # and derive name from filename (handled in main function)
@@ -74,6 +89,7 @@ def parse_multi_query_file(content: str) -> List[Dict]:
                 {
                     "name": None,  # Will be set by main function
                     "sql": sql,
+                    "query_type": "multi",  # default
                 }
             )
 
@@ -297,6 +313,7 @@ def generate_query_function(
     columns: List[tuple],
     oid_type_map: dict,
     param_types: dict,
+    query_type: str = "multi",
 ) -> str:
     params_signature = ", ".join(
         [f"{p}: {param_types.get(p, 'Any')}" for p in param_names]
@@ -315,6 +332,81 @@ def {func_name}(session, {params_signature}) -> None:
     )
 """
 
+    # For single query type with only one column, return the scalar value
+    if query_type == "single" and len(columns) == 1:
+        col_name, oid = columns[0]
+        pg_type = oid_type_map.get(oid, "Any")
+        py_type = pg_to_python(pg_type)
+
+        if py_type == "uuid.UUID":
+            return f"""
+def {func_name}(session, {params_signature}) -> {py_type}:
+    \"\"\"Executes the query and returns a single value.\"\"\"
+    result = session.execute(
+        text({repr(sql)}),
+        {params_dict}
+    )
+    row = result.fetchone()
+    if row is None:
+        raise ValueError("Query returned no results")
+    value = row[0]
+    if isinstance(value, str):
+        return uuid.UUID(value)
+    return value
+"""
+        else:
+            return f"""
+def {func_name}(session, {params_signature}) -> {py_type}:
+    \"\"\"Executes the query and returns a single value.\"\"\"
+    result = session.execute(
+        text({repr(sql)}),
+        {params_dict}
+    )
+    row = result.fetchone()
+    if row is None:
+        raise ValueError("Query returned no results")
+    return row[0]
+"""
+
+    # For single query type with multiple columns, return single row
+    if query_type == "single":
+        uuid_columns = [
+            colname
+            for colname, oid in columns
+            if pg_to_python(oid_type_map.get(oid, "Any")) == "uuid.UUID"
+        ]
+
+        if uuid_columns:
+            conversion = "    data = row._asdict()\n"
+            for c in uuid_columns:
+                conversion += f"    if isinstance(data['{c}'], str):\n        data['{c}'] = uuid.UUID(data['{c}'])\n"
+            conversion += f"    return {class_name}(**data)\n"
+            return f"""
+def {func_name}(session, {params_signature}) -> {class_name}:
+    \"\"\"Executes the query and returns a single result as dataclass.\"\"\"
+    result = session.execute(
+        text({repr(sql)}),
+        {params_dict}
+    )
+    row = result.fetchone()
+    if row is None:
+        raise ValueError("Query returned no results")
+{conversion}"""
+        else:
+            return f"""
+def {func_name}(session, {params_signature}) -> {class_name}:
+    \"\"\"Executes the query and returns a single result as dataclass.\"\"\"
+    result = session.execute(
+        text({repr(sql)}),
+        {params_dict}
+    )
+    row = result.fetchone()
+    if row is None:
+        raise ValueError("Query returned no results")
+    return {class_name}(**row._asdict())
+"""
+
+    # Multi query type (default behavior)
     uuid_columns = [
         colname
         for colname, oid in columns
@@ -377,6 +469,7 @@ def main(sql_file_path: str, db_url: str):
         for i, query in enumerate(queries):
             sql = query["sql"]
             query_name = query["name"]
+            query_type = query.get("query_type", "multi")
 
             # If no name provided, use filename or numbered suffix
             if not query_name:
@@ -410,11 +503,12 @@ def main(sql_file_path: str, db_url: str):
                 if imp.strip():
                     all_imports.add(imp.strip())
 
-            # Only generate dataclass if query returns data
-            if columns:
+            # Generate dataclass if needed
+            # - Skip dataclass for non-SELECT queries (no columns)
+            # - Skip dataclass for single-type queries with only one column
+            dataclass_code = ""
+            if columns and not (query_type == "single" and len(columns) == 1):
                 dataclass_code = generate_dataclass(class_name, columns, oid_type_map)
-            else:
-                dataclass_code = ""  # No dataclass needed for non-SELECT queries
 
             query_func_code = generate_query_function(
                 func_name,
@@ -424,6 +518,7 @@ def main(sql_file_path: str, db_url: str):
                 columns,
                 oid_type_map,
                 param_types,
+                query_type,
             )
 
             all_code_parts.append((dataclass_code, query_func_code))

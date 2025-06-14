@@ -1,4 +1,4 @@
 /*
-name=get_all_user
+name=get_all_users
 */
 select * from users;

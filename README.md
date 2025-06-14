@@ -11,6 +11,7 @@ This project is inspired by:
 ## Features
 
 - **Multiple queries per file**: Define multiple named queries in a single SQL file
+- **Flexible result types**: Choose between single values, single rows, or lists with `query_type`
 - **Intelligent parameter typing**: Automatic type inference for query parameters based on context
 - Generate Python dataclasses from SQL query results
 - Automatic type mapping from PostgreSQL types to Python types
@@ -87,6 +88,53 @@ The tool automatically infers parameter types based on how they're used in your 
 - **String patterns**: `WHERE email LIKE :pattern` → `pattern: str`
 - **Datetime types**: `WHERE created_at > :since` → `since: datetime.datetime`
 
+### Query Types
+
+You can specify how results should be returned using the `query_type` parameter:
+
+#### Multi-type Queries (Default)
+
+Returns a list of results. This is the default behavior when `query_type` is not specified:
+
+```sql
+/*
+name=get_all_users
+*/
+SELECT * FROM users;
+```
+
+Generates: `def get_all_users(session) -> List[GetAllUsersRow]`
+
+#### Single-type Queries
+
+Returns a single result. Add `query_type=single` to the comment block:
+
+**Single column queries** return the scalar value directly:
+
+```sql
+/*
+name=get_users_count
+query_type=single
+*/
+SELECT COUNT(*) as total_count FROM users WHERE created_at > :since_date;
+```
+
+Generates: `def get_users_count(session, since_date: datetime.datetime) -> int`
+
+**Multi-column queries** return a single dataclass instance:
+
+```sql
+/*
+name=get_user_by_email
+query_type=single
+*/
+SELECT id, email FROM users WHERE email = :email LIMIT 1;
+```
+
+Generates: `def get_user_by_email(session, email: str) -> GetUserByEmailRow`
+
+All single-type queries include error handling for cases where no results are found.
+
 ### Non-SELECT Queries
 
 The tool also supports INSERT, UPDATE, and DELETE queries:
@@ -105,23 +153,25 @@ These generate functions that return `None` instead of dataclass lists.
 ```python
 from sqlalchemy import create_engine, Session
 from datetime import datetime
-from src.pg_typed_py.sample.multi_queries import (
-    get_all_users,
-    get_user_by_email,
-    get_users_created_after
+from src.pg_typed_py.sample.complex_queries import (
+    get_user_by_id,           # Returns List[GetUserByIdRow]
+    get_users_count,          # Returns int (single value)
+    get_single_user_by_email, # Returns GetSingleUserByEmailRow (single row)
 )
 
 engine = create_engine("postgresql://db_user:password@localhost:5432/postgres")
 
 with Session(engine) as session:
-    # Get all users
-    all_users = get_all_users(session)
+    # Multi-type query: returns list of dataclasses
+    users = get_user_by_id(session, user_id="123e4567-e89b-12d3-a456-426614174000")
 
-    # Get user by email (parameter automatically typed as str)
-    user = get_user_by_email(session, "john@example.com")
+    # Single-type query: returns scalar value directly
+    total_count = get_users_count(session, since_date=datetime(2024, 1, 1))
+    print(f"Total users: {total_count}")  # total_count is an int
 
-    # Get users created after a date (parameter automatically typed as datetime)
-    recent_users = get_users_created_after(session, datetime(2024, 1, 1))
+    # Single-type query: returns single dataclass instance
+    user = get_single_user_by_email(session, email="john@example.com")
+    print(f"Found user: {user.id} - {user.email}")  # user is GetSingleUserByEmailRow
 ```
 
 ## How It Works
@@ -133,22 +183,29 @@ with Session(engine) as session:
 
 2. **Multi-Query Parsing**: Supports multiple named queries in a single file:
    - Parses `/* name=query_name */` comments to identify individual queries
+   - Extracts `query_type=single|multi` to control return behavior
    - Generates separate functions and dataclasses for each named query
    - Maintains backward compatibility with single-query files
 
-3. **Intelligent Parameter Typing**: Uses advanced heuristics to infer parameter types:
+3. **Flexible Return Types**: Adapts return types based on query type:
+   - **Multi-type (default)**: Returns `List[DataClass]` for multiple results
+   - **Single-type with one column**: Returns scalar values directly (`int`, `str`, `uuid.UUID`, etc.)
+   - **Single-type with multiple columns**: Returns single `DataClass` instance
+   - **Error handling**: Single-type queries raise `ValueError` when no results found
+
+4. **Intelligent Parameter Typing**: Uses advanced heuristics to infer parameter types:
    - **Database schema analysis**: Queries column types from `information_schema`
    - **Context analysis**: Examines how parameters are used (equality, comparisons, LIKE, etc.)
    - **Pattern recognition**: Recognizes common patterns (IDs, emails, timestamps)
    - **Fallback safety**: Defaults to `Any` type when inference is uncertain
 
-4. **Code Generation**: Generates clean, type-safe Python code:
-   - Dataclasses with properly typed fields for SELECT queries
-   - Functions that return `List[DataClass]` for SELECT or `None` for operations
+5. **Code Generation**: Generates clean, type-safe Python code:
+   - Dataclasses with properly typed fields for SELECT queries (when needed)
+   - Functions with appropriate return types based on `query_type`
    - Proper imports and type annotations
    - Automatic UUID string conversion handling
 
-5. **Type Safety**: The generated code provides full type safety, including:
+6. **Type Safety**: The generated code provides full type safety, including:
    - Automatic UUID conversion from strings
    - Proper datetime handling
    - IDE autocompletion and type checking
@@ -168,7 +225,7 @@ src/pg_typed_py/
 
 ## Generated Code Examples
 
-**From a multi-query SQL file:**
+**From a multi-query SQL file with different query types:**
 
 ```sql
 /*
@@ -177,11 +234,16 @@ name=get_user_by_email
 SELECT * FROM users WHERE email = :email;
 
 /*
-name=get_users_created_after
+name=get_users_count
+query_type=single
 */
-SELECT id, email, created_at
-FROM users
-WHERE created_at > :created_after;
+SELECT COUNT(*) FROM users WHERE created_at > :since_date;
+
+/*
+name=get_single_user
+query_type=single
+*/
+SELECT id, email FROM users WHERE email = :email LIMIT 1;
 ```
 
 **Generates:**
@@ -198,14 +260,17 @@ def get_user_by_email(session, email: str) -> List[GetUserByEmailRow]:
     """Executes the query and returns results as dataclasses."""
     # ... implementation
 
+def get_users_count(session, since_date: datetime.datetime) -> int:
+    """Executes the query and returns a single value."""
+    # ... implementation
+
 @dataclass
-class GetUsersCreatedAfterRow:
+class GetSingleUserRow:
     id: uuid.UUID
     email: str
-    created_at: datetime.datetime
 
-def get_users_created_after(session, created_after: datetime.datetime) -> List[GetUsersCreatedAfterRow]:
-    """Executes the query and returns results as dataclasses."""
+def get_single_user(session, email: str) -> GetSingleUserRow:
+    """Executes the query and returns a single result as dataclass."""
     # ... implementation
 ```
 
